@@ -1,6 +1,7 @@
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import cv2
 import numpy as np
@@ -9,12 +10,14 @@ import base64
 import time
 import asyncio
 import json
+import os
 from typing import List, Dict, Optional
 
 from utils.gesture_recognition import GestureRecognizer
 from utils.tts import get_tts_engine
 from utils.openai_integration import OpenAIAssistant
-from config.config import API_HOST, API_PORT, GESTURE_MEANINGS
+from utils.audio_manager import audio_manager
+from config.config import API_HOST, API_PORT, GESTURE_MEANINGS, TTS_OUTPUT_DIR
 
 # Initialize the FastAPI app
 app = FastAPI(title="Hand Gesture Recognition API", 
@@ -29,6 +32,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static audio files directory
+app.mount("/audio", StaticFiles(directory=TTS_OUTPUT_DIR), name="audio")
 
 # Create global instances of our core components
 try:
@@ -100,6 +106,20 @@ async def detect_gesture(file: UploadFile = File(...)):
         confidence = detection["confidence"]
         interpretation = gesture_recognizer._get_interpretation(gesture_label)
         
+        # Generate audio for the interpretation
+        audio_path = None
+        audio_url = None
+        
+        # Check if we have a cached audio file
+        audio_path = audio_manager.get_audio_path(interpretation)
+        if not audio_path:
+            # Generate speech if not cached
+            audio_path = tts_engine.generate_speech(interpretation)
+            audio_manager.save_audio(interpretation, audio_path)
+        
+        # Get URL for the audio file
+        audio_url = audio_manager.get_audio_url(audio_path)
+        
         # Convert processed image to base64 for response
         _, buffer = cv2.imencode(".jpg", processed_image)
         img_str = base64.b64encode(buffer).decode("utf-8")
@@ -110,7 +130,8 @@ async def detect_gesture(file: UploadFile = File(...)):
             "gesture": gesture_label,
             "confidence": confidence,
             "interpretation": interpretation,
-            "processed_image": img_str
+            "processed_image": img_str,
+            "audio_url": audio_url
         })
     except Exception as e:
         return JSONResponse(content={"success": False, "message": f"Error: {str(e)}"})
@@ -118,21 +139,70 @@ async def detect_gesture(file: UploadFile = File(...)):
 
 @app.post("/text-to-speech")
 async def convert_text_to_speech(background_tasks: BackgroundTasks, text: str):
-    """Convert provided text to speech"""
+    """Convert provided text to speech and return audio file"""
     try:
-        # Convert text to speech
+        # Check if we already have this text in cache
+        cached_path = audio_manager.get_audio_path(text)
+        if cached_path:
+            return FileResponse(cached_path, media_type="audio/mpeg")
+            
+        # Convert text to speech if not cached
         filepath = tts_engine.speak(text)
         
-        # Read the audio file
-        with open(filepath, "rb") as audio_file:
-            audio_data = audio_file.read()
+        # Save to cache
+        audio_manager.save_audio(text, filepath)
         
-        # Create a streaming response
-        return StreamingResponse(
-            io.BytesIO(audio_data),
-            media_type="audio/mpeg"
-        )
+        # Return the file
+        return FileResponse(filepath, media_type="audio/mpeg")
     except Exception as e:
+        return JSONResponse(content={"success": False, "message": f"Error: {str(e)}"})
+
+
+@app.get("/audio-url/{text}")
+async def get_audio_url(text: str):
+    """Get a URL to the audio file for the given text, generating if needed"""
+    try:
+        # Check if we already have this text in cache
+        cached_path = audio_manager.get_audio_path(text)
+        
+        # Generate speech if not in cache
+        if not cached_path:
+            filepath = tts_engine.generate_speech(text)
+            cached_path = audio_manager.save_audio(text, filepath)
+        
+        # Get the URL for the file
+        audio_url = audio_manager.get_audio_url(cached_path)
+        
+        if not audio_url:
+            raise HTTPException(status_code=404, detail="Failed to generate audio URL")
+            
+        return JSONResponse(content={
+            "success": True,
+            "audio_url": audio_url
+        })
+    except Exception as e:
+        return JSONResponse(content={"success": False, "message": f"Error: {str(e)}"})
+
+
+@app.get("/audio/{filename}")
+async def get_audio_file(filename: str = Path(..., description="Audio filename")):
+    """Get a specific audio file by name"""
+    try:
+        # Validate filename to prevent directory traversal
+        if '..' in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        # Construct full path
+        file_path = os.path.join(TTS_OUTPUT_DIR, filename)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Audio file not found")
+            
+        return FileResponse(file_path, media_type="audio/mpeg")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         return JSONResponse(content={"success": False, "message": f"Error: {str(e)}"})
 
 
@@ -178,6 +248,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 confidence = detection["confidence"]
                 interpretation = gesture_recognizer._get_interpretation(gesture_label)
                 
+                # Generate audio for the interpretation
+                audio_path = None
+                audio_url = None
+                
+                # Check if we have a cached audio file
+                audio_path = audio_manager.get_audio_path(interpretation)
+                if not audio_path:
+                    # Generate speech if not cached
+                    audio_path = tts_engine.generate_speech(interpretation)
+                    audio_manager.save_audio(interpretation, audio_path)
+                
+                # Get URL for the audio file
+                audio_url = audio_manager.get_audio_url(audio_path)
+                
                 # Convert processed frame back to base64
                 _, buffer = cv2.imencode(".jpg", processed_frame)
                 processed_base64 = base64.b64encode(buffer).decode("utf-8")
@@ -188,7 +272,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     "gesture": gesture_label,
                     "confidence": confidence,
                     "interpretation": interpretation,
-                    "processed_image": processed_base64
+                    "processed_image": processed_base64,
+                    "audio_url": audio_url
                 })
             else:
                 # No detection

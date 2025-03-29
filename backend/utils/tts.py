@@ -5,6 +5,7 @@ import pyttsx3
 from pathlib import Path
 
 from config.config import TTS_ENGINE, TTS_LANGUAGE, TTS_OUTPUT_DIR, OPENAI_API_KEY, OPENAI_TTS_VOICE
+from utils.audio_manager import audio_manager
 
 
 class TTSEngine:
@@ -28,6 +29,12 @@ class GTTSEngine(TTSEngine):
     def speak(self, text):
         """Convert text to speech using Google TTS"""
         try:
+            # Check audio cache first
+            cached_path = audio_manager.get_audio_path(text)
+            if cached_path:
+                self._play_audio(cached_path)
+                return cached_path
+                
             # Generate a unique filename based on timestamp
             filename = f"tts_{int(time.time())}.mp3"
             filepath = os.path.join(self.output_dir, filename)
@@ -36,44 +43,49 @@ class GTTSEngine(TTSEngine):
             tts = gtts.gTTS(text=text, lang=self.language, slow=False)
             tts.save(filepath)
             
+            # Save to cache
+            audio_manager.save_audio(text, filepath)
+            
             # Play the audio file (platform-specific)
             self._play_audio(filepath)
             
             return filepath
         except Exception as e:
-            print(f"GTTSEngine error: {e}")
+            print(f"Error in GTTSEngine.speak: {e}")
             return None
     
     def generate_speech(self, text, output_file=None):
         """Generate speech from text and save to specified file"""
         try:
-            # Use provided output file or generate a default one
-            filepath = output_file or os.path.join(self.output_dir, f"tts_{int(time.time())}.mp3")
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Check audio cache first
+            cached_path = audio_manager.get_audio_path(text)
+            if cached_path and not output_file:
+                return cached_path
+                
+            # If output file is specified, use it, otherwise generate a filename
+            if not output_file:
+                filename = f"tts_{int(time.time())}.mp3"
+                output_file = os.path.join(self.output_dir, filename)
             
             # Create TTS object and save to file
             tts = gtts.gTTS(text=text, lang=self.language, slow=False)
-            tts.save(filepath)
+            tts.save(output_file)
             
-            print(f"Speech generated and saved to {filepath}")
-            return filepath
+            # Save to cache if using default output
+            if not output_file:
+                audio_manager.save_audio(text, output_file)
+            
+            return output_file
         except Exception as e:
-            print(f"GTTSEngine error: {e}")
+            print(f"Error in GTTSEngine.generate_speech: {e}")
             return None
     
     def _play_audio(self, filepath):
         """Play the audio file using platform-specific methods"""
-        try:
-            # Using playsound library (cross-platform)
-            # Note: In a real implementation, we'd need to handle platform differences
-            import playsound
-            playsound.playsound(filepath)
-        except ImportError:
-            print("'playsound' package not installed. Cannot play audio.")
-        except Exception as e:
-            print(f"Error playing audio: {e}")
+        # Platform-specific audio playback can be implemented here
+        # This is just a placeholder - frontend will handle audio playback
+        print(f"[Audio would play: {filepath}]")
+        return filepath
 
 
 class PyttsxEngine(TTSEngine):
@@ -90,40 +102,58 @@ class PyttsxEngine(TTSEngine):
             if 'female' in voice.name.lower():
                 self.engine.setProperty('voice', voice.id)
                 break
+        
+        # Create output directory
+        self.output_dir = TTS_OUTPUT_DIR
+        os.makedirs(self.output_dir, exist_ok=True)
     
     def speak(self, text):
         """Convert text to speech using pyttsx3"""
         try:
-            self.engine.say(text)
-            self.engine.runAndWait()
-            return True
+            # Check audio cache first
+            cached_path = audio_manager.get_audio_path(text)
+            if cached_path:
+                return cached_path
+                
+            # Generate a unique filename
+            filename = f"tts_{int(time.time())}.mp3"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            # Generate speech and save to file
+            self.generate_speech(text, filepath)
+            
+            # Save to cache
+            audio_manager.save_audio(text, filepath)
+            
+            return filepath
         except Exception as e:
-            print(f"PyttsxEngine error: {e}")
-            return False
+            print(f"Error in PyttsxEngine.speak: {e}")
+            return None
     
     def generate_speech(self, text, output_file=None):
         """Generate speech from text and save to specified file"""
         try:
-            # Use provided output file or generate a default one
+            # Check audio cache first
+            cached_path = audio_manager.get_audio_path(text)
+            if cached_path and not output_file:
+                return cached_path
+                
+            # If output file is specified, use it, otherwise generate a filename
             if not output_file:
-                output_dir = TTS_OUTPUT_DIR
-                os.makedirs(output_dir, exist_ok=True)
-                output_file = os.path.join(output_dir, f"tts_{int(time.time())}.wav")
-            else:
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(output_file), exist_ok=True)
-            
-            # Create an instance of the engine
-            engine = pyttsx3.init()
+                filename = f"tts_{int(time.time())}.mp3"
+                output_file = os.path.join(self.output_dir, filename)
             
             # Save to file
-            engine.save_to_file(text, output_file)
-            engine.runAndWait()
+            self.engine.save_to_file(text, output_file)
+            self.engine.runAndWait()
             
-            print(f"Speech generated and saved to {output_file}")
+            # Save to cache if using default output
+            if not output_file:
+                audio_manager.save_audio(text, output_file)
+            
             return output_file
         except Exception as e:
-            print(f"PyttsxEngine error: {e}")
+            print(f"Error in PyttsxEngine.generate_speech: {e}")
             return None
 
 
@@ -138,6 +168,12 @@ class OpenAITTSEngine(TTSEngine):
     def speak(self, text):
         """Convert text to speech using OpenAI TTS"""
         try:
+            # Check audio cache first
+            cached_path = audio_manager.get_audio_path(text)
+            if cached_path:
+                self._play_audio(cached_path)
+                return cached_path
+                
             # Generate a unique filename based on timestamp
             filename = f"tts_{int(time.time())}.mp3"
             filepath = os.path.join(self.output_dir, filename)
@@ -145,73 +181,76 @@ class OpenAITTSEngine(TTSEngine):
             # Generate audio file
             self._generate_audio(text, filepath)
             
+            # Save to cache
+            audio_manager.save_audio(text, filepath)
+            
             # Play the audio file
             self._play_audio(filepath)
             
             return filepath
         except Exception as e:
-            print(f"OpenAITTSEngine error: {e}")
+            print(f"Error in OpenAITTSEngine.speak: {e}")
             return None
     
     def generate_speech(self, text, output_file=None):
         """Generate speech from text and save to specified file"""
         try:
-            # Use provided output file or generate a default one
-            filepath = output_file or os.path.join(self.output_dir, f"tts_{int(time.time())}.mp3")
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Check audio cache first
+            cached_path = audio_manager.get_audio_path(text)
+            if cached_path and not output_file:
+                return cached_path
+                
+            # If output file is specified, use it, otherwise generate a filename
+            if not output_file:
+                filename = f"tts_{int(time.time())}.mp3"
+                output_file = os.path.join(self.output_dir, filename)
             
             # Generate audio file
-            self._generate_audio(text, filepath)
+            self._generate_audio(text, output_file)
             
-            print(f"Speech generated and saved to {filepath}")
-            return filepath
+            # Save to cache if using default output
+            if not output_file:
+                audio_manager.save_audio(text, output_file)
+            
+            return output_file
         except Exception as e:
-            print(f"OpenAITTSEngine error: {e}")
+            print(f"Error in OpenAITTSEngine.generate_speech: {e}")
             return None
     
     def _generate_audio(self, text, filepath):
         """Generate audio file using OpenAI TTS API"""
+        import openai
+        
         try:
-            # Import the required library
-            from openai import OpenAI
-            
-            # Initialize the client
-            client = OpenAI(api_key=self.api_key)
-            
-            # Generate the audio using OpenAI TTS API
+            client = openai.OpenAI(api_key=self.api_key)
             response = client.audio.speech.create(
                 model="tts-1",
                 voice=self.voice,
                 input=text
             )
-            
-            # Save the audio content to a file
             response.stream_to_file(filepath)
-            
+            return filepath
         except Exception as e:
-            print(f"OpenAITTSEngine error: {e}")
+            print(f"Error generating OpenAI TTS: {e}")
+            return None
     
     def _play_audio(self, filepath):
         """Play the audio file using platform-specific methods"""
-        try:
-            # Using playsound library (cross-platform)
-            import playsound
-            playsound.playsound(filepath)
-        except ImportError:
-            print("'playsound' package not installed. Cannot play audio.")
-        except Exception as e:
-            print(f"Error playing audio: {e}")
+        # Platform-specific audio playback can be implemented here
+        # This is just a placeholder - frontend will handle audio playback
+        print(f"[Audio would play: {filepath}]")
+        return filepath
 
 
+# Factory function to get the appropriate TTS engine
 def get_tts_engine(engine_type=TTS_ENGINE):
-    """Factory function to get the appropriate TTS engine"""
-    if engine_type.lower() == "gtts":
+    """Returns the appropriate TTS engine based on configuration"""
+    if engine_type.lower() == 'gtts':
         return GTTSEngine()
-    elif engine_type.lower() == "pyttsx3":
+    elif engine_type.lower() == 'pyttsx3':
         return PyttsxEngine()
-    elif engine_type.lower() == "openai":
+    elif engine_type.lower() == 'openai':
         return OpenAITTSEngine()
     else:
-        raise ValueError(f"Unsupported TTS engine: {engine_type}")
+        print(f"Unknown TTS engine: {engine_type}, defaulting to gtts")
+        return GTTSEngine()
